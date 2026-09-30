@@ -356,6 +356,8 @@ public final class Views {
         private List<TimelineNode> timeline = new ArrayList<>();
         /** @ElementCollection Map 逐日温度/糖度曲线 */
         private List<CurvePoint> curve = new ArrayList<>();
+        /** 创建批次时钉死的配方用量快照（含分维度规范化合计）；历史无快照时为 null */
+        private BatchRecipeSnapshotView recipeSnapshot;
         private LocalDateTime updatedAt;
 
         public static BatchView of(Batch e, String recipeName) {
@@ -366,6 +368,14 @@ public final class Views {
          * @param qc 当前批次的质检状态；列表场景可传 null（不额外查库，前端可再拉详情）
          */
         public static BatchView of(Batch e, String recipeName, BatchQcStateView qc) {
+            return of(e, recipeName, qc, null);
+        }
+
+        /**
+         * @param snapshot 批次创建时的配方用量快照（详情场景传入；列表为 null 省一次查询）
+         */
+        public static BatchView of(Batch e, String recipeName, BatchQcStateView qc,
+                                   BatchRecipeSnapshotView snapshot) {
             BatchView v = new BatchView();
             v.setId(e.getId());
             v.setBatchNo(e.getBatchNo());
@@ -398,6 +408,7 @@ public final class Views {
             }
             v.buildTimeline();
             v.buildCurve(e);
+            v.setRecipeSnapshot(snapshot);
             v.setUpdatedAt(e.getUpdatedAt());
             return v;
         }
@@ -439,6 +450,46 @@ public final class Views {
         node.setTime(time);
         node.setStatus(time == null ? "PENDING" : "DONE");
         nodes.add(node);
+    }
+
+    /** 批次创建当时的配方用量快照（只读，统一计量引擎对快照行计算） */
+    @Data
+    public static class BatchRecipeSnapshotView {
+
+        private Long snapshotId;
+        private Long batchId;
+        private String batchNo;
+        private Long recipeId;
+        private String recipeCode;
+        private String recipeName;
+        private BigDecimal baseBatchSizeL;
+        private BigDecimal batchVolumeL;
+        /** LIVE 创建实时快照 / LEGACY 迁移回填 */
+        private String snapshotKind;
+        private Long recipeItemVersion;
+        private int unresolvedCount;
+        private LocalDateTime createdAt;
+        /** 快照行的统一计量结果：显示值沿用创建当时单位，合计按快照规范化值计算 */
+        private MetricDtos.RecipeMetrics metrics;
+
+        public static BatchRecipeSnapshotView of(com.brewery.craft.domain.BatchRecipeSnapshot e,
+                                                 MetricDtos.RecipeMetrics metrics) {
+            BatchRecipeSnapshotView v = new BatchRecipeSnapshotView();
+            v.setSnapshotId(e.getId());
+            v.setBatchId(e.getBatchId());
+            v.setBatchNo(e.getBatchNo());
+            v.setRecipeId(e.getRecipeId());
+            v.setRecipeCode(e.getRecipeCode());
+            v.setRecipeName(e.getRecipeName());
+            v.setBaseBatchSizeL(e.getBaseBatchSizeL());
+            v.setBatchVolumeL(e.getBatchVolumeL());
+            v.setSnapshotKind(e.getSnapshotKind());
+            v.setRecipeItemVersion(e.getRecipeItemVersion());
+            v.setUnresolvedCount(e.getUnresolvedCount() == null ? 0 : e.getUnresolvedCount());
+            v.setCreatedAt(e.getCreatedAt());
+            v.setMetrics(metrics);
+            return v;
+        }
     }
 
     /** 批次量价：某状态下的产量汇总 */
@@ -628,6 +679,12 @@ public final class Views {
         private BigDecimal quantity;
         private String unit;
         private String note;
+        /** 规范化单位 / 基准数量 / 单位状态（OK/DERIVED/UNRESOLVED）与说明 */
+        private String canonicalUnit;
+        private String dimension;
+        private BigDecimal baseQuantity;
+        private String unitStatus;
+        private String unitNote;
 
         public static RecipeItemView of(String stage, RecipeItem item) {
             RecipeItemView v = new RecipeItemView();
@@ -641,18 +698,12 @@ public final class Views {
             v.setQuantity(item.getQuantity());
             v.setUnit(item.getUnit());
             v.setNote(item.getNote());
+            v.setCanonicalUnit(item.getCanonicalUnit());
+            v.setBaseQuantity(item.getBaseQuantity());
+            v.setUnitStatus(item.getUnitStatus());
+            v.setUnitNote(item.getUnitNote());
             return v;
         }
-    }
-
-    @Data
-    public static class CompositionSlice {
-
-        private String ingredientType;
-        private String ingredientTypeName;
-        private String color;
-        private BigDecimal amount;
-        private BigDecimal percent;
     }
 
     @Data
@@ -668,9 +719,18 @@ public final class Views {
         private BigDecimal targetIbu;
         private BigDecimal targetEbc;
         private String processNote;
+        /** 配方基准批量（L），缩放比例的分母；历史配方为空时由服务层兜底 1000L */
+        private BigDecimal baseBatchSizeL;
+        /** 明细版本号（缩放预览过期校验用） */
+        private Long itemVersion;
         private int itemCount;
-        /** 各原料类型占比（conic-gradient 环形图） */
-        private List<CompositionSlice> composition = new ArrayList<>();
+        /**
+         * 各类原料投放占比（conic-gradient 环形图）。
+         * 已迁移为直接引用统一计量引擎的分维度占比结果，保证列表、环形图、批次详情同源。
+         */
+        private List<MetricDtos.CompositionSlice> composition = new ArrayList<>();
+        /** 统一计量摘要：规范化明细 / 阶段小计 / 分维度合计 / 待处理告警 */
+        private MetricDtos.RecipeMetrics metrics;
         private List<RecipeItemView> items = new ArrayList<>();
         private LocalDateTime updatedAt;
 
@@ -686,6 +746,8 @@ public final class Views {
             v.setTargetIbu(e.getTargetIbu());
             v.setTargetEbc(e.getTargetEbc());
             v.setProcessNote(e.getProcessNote());
+            v.setBaseBatchSizeL(e.getBaseBatchSizeL());
+            v.setItemVersion(e.getItemVersion());
             Map<String, RecipeItem> map = e.getItems() == null ? Map.of() : e.getItems();
             List<String> keys = new ArrayList<>(map.keySet());
             keys.sort((a, b) -> Integer.compare(STAGE_ORDER.indexOf(a) < 0 ? 99 : STAGE_ORDER.indexOf(a),
@@ -694,38 +756,17 @@ public final class Views {
                 v.getItems().add(RecipeItemView.of(key, map.get(key)));
             }
             v.setItemCount(v.getItems().size());
-            v.buildComposition();
+            v.metrics = com.brewery.craft.service.measure.MetricEngine.build(
+                    com.brewery.craft.service.RecipeMetricsFactory.fromRecipe(e));
+            // 环形图只渲染主维度的切片；需要全维度时前端直接读 metrics.composition
+            String primary = v.metrics.getPrimaryDimension();
+            for (MetricDtos.CompositionSlice slice : v.metrics.getComposition()) {
+                if (slice.getDimension().equals(primary)) {
+                    v.composition.add(slice);
+                }
+            }
             v.setUpdatedAt(e.getUpdatedAt());
             return v;
-        }
-
-        private void buildComposition() {
-            Map<String, BigDecimal> sumByType = new LinkedHashMap<>();
-            BigDecimal total = BigDecimal.ZERO;
-            for (RecipeItemView it : items) {
-                if (it.getQuantity() == null) {
-                    continue;
-                }
-                sumByType.merge(it.getIngredientType(), it.getQuantity(), BigDecimal::add);
-                total = total.add(it.getQuantity());
-            }
-            if (total.compareTo(BigDecimal.ZERO) <= 0) {
-                return;
-            }
-            for (String type : INGREDIENT_TYPE_ORDER) {
-                BigDecimal amount = sumByType.get(type);
-                if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
-                    continue;
-                }
-                CompositionSlice slice = new CompositionSlice();
-                slice.setIngredientType(type);
-                slice.setIngredientTypeName(ingredientTypeName(type));
-                slice.setColor(ingredientColor(type));
-                slice.setAmount(amount);
-                slice.setPercent(amount.multiply(BigDecimal.valueOf(100))
-                        .divide(total, 1, java.math.RoundingMode.HALF_UP));
-                composition.add(slice);
-            }
         }
     }
 

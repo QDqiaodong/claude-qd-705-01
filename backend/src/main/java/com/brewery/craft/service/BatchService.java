@@ -36,19 +36,22 @@ public class BatchService {
     private final QcRoundRepository qcRoundRepository;
     private final ShipmentRepository shipmentRepository;
     private final QcGate qcGate;
+    private final BatchSnapshotService batchSnapshotService;
 
     public BatchService(BatchRepository batchRepository,
                         RecipeRepository recipeRepository,
                         FermenterRepository fermenterRepository,
                         QcRoundRepository qcRoundRepository,
                         ShipmentRepository shipmentRepository,
-                        QcGate qcGate) {
+                        QcGate qcGate,
+                        BatchSnapshotService batchSnapshotService) {
         this.batchRepository = batchRepository;
         this.recipeRepository = recipeRepository;
         this.fermenterRepository = fermenterRepository;
         this.qcRoundRepository = qcRoundRepository;
         this.shipmentRepository = shipmentRepository;
         this.qcGate = qcGate;
+        this.batchSnapshotService = batchSnapshotService;
     }
 
     public List<Views.BatchView> list(String status) {
@@ -57,16 +60,19 @@ public class BatchService {
                 : batchRepository.findAllByStatusOrderByBatchNoAsc(status);
         List<Views.BatchView> list = new ArrayList<>();
         for (Batch b : batches) {
-            list.add(view(b));
+            list.add(view(b, false));
         }
         return list;
     }
 
     public Views.BatchView get(Long id) {
-        return view(batchRepository.findById(id).orElseThrow(() -> new BizException("批次不存在")));
+        return view(batchRepository.findById(id).orElseThrow(() -> new BizException("批次不存在")), true);
     }
 
-    private Views.BatchView view(Batch b) {
+    /**
+     * @param withSnapshot 列表场景不带用量快照（省一次查询）；详情场景带上创建当时的配方用量快照
+     */
+    private Views.BatchView view(Batch b, boolean withSnapshot) {
         String recipeName = "";
         if (b.getRecipeId() != null) {
             recipeName = recipeRepository.findById(b.getRecipeId()).map(Recipe::getName).orElse("");
@@ -76,7 +82,9 @@ public class BatchService {
         QcGate.QcState state = qcGate.evaluate(b, latest, roundCount);
         Views.BatchQcStateView qc =
                 Views.BatchQcStateView.of(state.code, state.latestRound, state.reason, state.roundCount);
-        return Views.BatchView.of(b, recipeName, qc);
+        Views.BatchRecipeSnapshotView snapshot = withSnapshot
+                ? batchSnapshotService.viewOfBatch(b.getId()) : null;
+        return Views.BatchView.of(b, recipeName, qc, snapshot);
     }
 
     @Transactional
@@ -88,8 +96,10 @@ public class BatchService {
         if (Views.batchStatusName(status).equals(status)) {
             throw new BizException("批次状态取值非法：" + status);
         }
-        if (req.getRecipeId() != null && recipeRepository.findById(req.getRecipeId()).isEmpty()) {
-            throw new BizException("配方不存在");
+        Recipe recipe = null;
+        if (req.getRecipeId() != null) {
+            recipe = recipeRepository.findById(req.getRecipeId())
+                    .orElseThrow(() -> new BizException("配方不存在"));
         }
         Batch b = new Batch();
         b.setBatchNo(req.getBatchNo());
@@ -109,7 +119,10 @@ public class BatchService {
         b.setEbc(req.getEbc());
         b.setStatus(status);
         b.setUpdatedAt(LocalDateTime.now());
-        return view(batchRepository.save(b));
+        Batch saved = batchRepository.save(b);
+        // 创建即快照：当时配方版本的用量钉死，之后配方再缩放/换单位都不改这个批次
+        batchSnapshotService.snapshotForNewBatch(saved, recipe);
+        return view(saved, true);
     }
 
     /**
@@ -163,7 +176,7 @@ public class BatchService {
         b.setUpdatedAt(now);
         Batch saved = batchRepository.save(b);
         syncTank(saved);
-        return view(saved);
+        return view(saved, true);
     }
 
     /**
@@ -201,7 +214,7 @@ public class BatchService {
             }
         }
         syncTank(saved);
-        return view(saved);
+        return view(saved, true);
     }
 
     private void syncTank(Batch batch) {
@@ -238,7 +251,7 @@ public class BatchService {
             b.getGravityReadings().put(dayKey, req.getGravity());
         }
         b.setUpdatedAt(LocalDateTime.now());
-        return view(batchRepository.save(b));
+        return view(batchRepository.save(b), true);
     }
 
     @Transactional
@@ -250,7 +263,7 @@ public class BatchService {
         b.getTempReadings().remove(dayKey);
         b.getGravityReadings().remove(dayKey);
         b.setUpdatedAt(LocalDateTime.now());
-        return view(batchRepository.save(b));
+        return view(batchRepository.save(b), true);
     }
 
     /** 按 key 查询某一天的温度/糖度 */

@@ -60,6 +60,20 @@ public class Recipe {
     private String processNote;
 
     /**
+     * 配方基准批量（L）：配方用量对应的标准批次体积，缩放比例 = 目标批量 / 基准批量。
+     * 为空时以 1000L 作为兼容默认（{@code RecipeService} 统一兜底，不把默认值静默写死给前端）。
+     */
+    @Column(name = "base_batch_size_l", precision = 10, scale = 2)
+    private BigDecimal baseBatchSizeL;
+
+    /**
+     * 明细版本号：任何用量明细的增删改（含缩放应用）都 +1。
+     * 缩放预览携带它对应的版本指纹，确认应用时校验，防止把旧预览覆盖到被别人改过的明细上。
+     */
+    @Column(name = "item_version", nullable = false)
+    private Long itemVersion = 0L;
+
+    /**
      * 【主数据访问路线：@OneToMany + @MapKeyColumn 的 Map 集合映射】
      * key = 投放阶段（MASH_IN / BOIL_60 / DRYHOP_1 …），落在 recipe_item.stage 列；
      * value = 该阶段的原料用量明细实体。

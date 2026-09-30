@@ -85,9 +85,32 @@ public class RecipeController {
         return ApiResponse.success("用量已删除", recipeService.removeItem(id, stage));
     }
 
-    /** 环形图用的原料构成 */
+    /** 环形图用的原料构成（统一计量引擎的分维度占比） */
     @GetMapping("/{id}/composition")
-    public ApiResponse<List<Views.CompositionSlice>> composition(@PathVariable("id") Long id) {
+    public ApiResponse<List<com.brewery.craft.dto.MetricDtos.CompositionSlice>> composition(
+            @PathVariable("id") Long id) {
         return ApiResponse.success(recipeService.composition(id));
+    }
+
+    /** 整张配方的统一计量摘要：规范化明细、阶段小计、分维度合计、待处理项 */
+    @GetMapping("/{id}/metrics")
+    public ApiResponse<com.brewery.craft.dto.MetricDtos.RecipeMetrics> metrics(@PathVariable("id") Long id) {
+        return ApiResponse.success(recipeService.metrics(id));
+    }
+
+    /** 缩放预览：原值/换算值/舍入/余差去向 + 目标合计对照，不落库 */
+    @PostMapping("/{id}/scale-preview")
+    public ApiResponse<com.brewery.craft.dto.MetricDtos.ScaleView> previewScale(
+            @PathVariable("id") Long id,
+            @Valid @RequestBody RecipeDtos.ScalePreviewReq req) {
+        return ApiResponse.success(recipeService.previewScale(id, req));
+    }
+
+    /** 确认应用缩放：强校验预览指纹，明细被改过则拒绝并要求重新预览 */
+    @PostMapping("/{id}/scale-apply")
+    public ApiResponse<com.brewery.craft.dto.MetricDtos.ScaleView> applyScale(
+            @PathVariable("id") Long id,
+            @Valid @RequestBody RecipeDtos.ScaleApplyReq req) {
+        return ApiResponse.success("缩放已应用", recipeService.applyScale(id, req));
     }
 }
