@@ -13,12 +13,14 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.brewery.craft.common.BizException;
 import com.brewery.craft.domain.Batch;
+import com.brewery.craft.domain.BatchRecipeItem;
 import com.brewery.craft.domain.Fermenter;
 import com.brewery.craft.domain.QcRound;
 import com.brewery.craft.domain.Recipe;
 import com.brewery.craft.domain.Shipment;
 import com.brewery.craft.dto.BatchDtos;
 import com.brewery.craft.dto.Views;
+import com.brewery.craft.repository.BatchRecipeItemRepository;
 import com.brewery.craft.repository.BatchRepository;
 import com.brewery.craft.repository.FermenterRepository;
 import com.brewery.craft.repository.QcRoundRepository;
@@ -35,6 +37,8 @@ public class BatchService {
     private final FermenterRepository fermenterRepository;
     private final QcRoundRepository qcRoundRepository;
     private final ShipmentRepository shipmentRepository;
+    private final BatchRecipeItemRepository batchRecipeItemRepository;
+    private final BatchSnapshotAssembler snapshotAssembler;
     private final QcGate qcGate;
 
     public BatchService(BatchRepository batchRepository,
@@ -42,12 +46,16 @@ public class BatchService {
                         FermenterRepository fermenterRepository,
                         QcRoundRepository qcRoundRepository,
                         ShipmentRepository shipmentRepository,
+                        BatchRecipeItemRepository batchRecipeItemRepository,
+                        BatchSnapshotAssembler snapshotAssembler,
                         QcGate qcGate) {
         this.batchRepository = batchRepository;
         this.recipeRepository = recipeRepository;
         this.fermenterRepository = fermenterRepository;
         this.qcRoundRepository = qcRoundRepository;
         this.shipmentRepository = shipmentRepository;
+        this.batchRecipeItemRepository = batchRecipeItemRepository;
+        this.snapshotAssembler = snapshotAssembler;
         this.qcGate = qcGate;
     }
 
@@ -63,9 +71,10 @@ public class BatchService {
     }
 
     public Views.BatchView get(Long id) {
-        return view(batchRepository.findById(id).orElseThrow(() -> new BizException("批次不存在")));
+        return detailView(batchRepository.findById(id).orElseThrow(() -> new BizException("批次不存在")));
     }
 
+    /** 列表场景：不带快照，避免列表逐条放大载荷 */
     private Views.BatchView view(Batch b) {
         String recipeName = "";
         if (b.getRecipeId() != null) {
@@ -79,6 +88,23 @@ public class BatchService {
         return Views.BatchView.of(b, recipeName, qc);
     }
 
+    /** 详情场景：附带创建当时的配方用量快照（历史副本，配方后续改动不影响它） */
+    private Views.BatchView detailView(Batch b) {
+        Views.BatchView v = view(b);
+        List<BatchRecipeItem> rows = batchRecipeItemRepository.findAllByBatchIdOrderByIdAsc(b.getId());
+        if (!rows.isEmpty()) {
+            String recipeName = v.getRecipeName();
+            Integer recipeVersion = null;
+            if (b.getRecipeId() != null) {
+                // 只取版本用于展示；快照内容绝不按现配方重算
+                recipeVersion = recipeRepository.findById(b.getRecipeId()).map(Recipe::getVersion).orElse(null);
+            }
+            v.setRecipeSnapshot(snapshotAssembler.toView(
+                    b.getId(), b.getBatchNo(), recipeName, recipeVersion, rows));
+        }
+        return v;
+    }
+
     @Transactional
     public Views.BatchView create(BatchDtos.BatchSaveReq req) {
         if (batchRepository.existsByBatchNo(req.getBatchNo())) {
@@ -88,8 +114,10 @@ public class BatchService {
         if (Views.batchStatusName(status).equals(status)) {
             throw new BizException("批次状态取值非法：" + status);
         }
-        if (req.getRecipeId() != null && recipeRepository.findById(req.getRecipeId()).isEmpty()) {
-            throw new BizException("配方不存在");
+        Recipe recipe = null;
+        if (req.getRecipeId() != null) {
+            recipe = recipeRepository.findById(req.getRecipeId())
+                    .orElseThrow(() -> new BizException("配方不存在"));
         }
         Batch b = new Batch();
         b.setBatchNo(req.getBatchNo());
@@ -109,7 +137,15 @@ public class BatchService {
         b.setEbc(req.getEbc());
         b.setStatus(status);
         b.setUpdatedAt(LocalDateTime.now());
-        return view(batchRepository.save(b));
+        Batch saved = batchRepository.save(b);
+
+        // 建档即固化配方用量快照：之后配方改单位/改用量/缩放都不改变本批次的投料记录
+        if (recipe != null) {
+            List<BatchRecipeItem> snapshot =
+                    snapshotAssembler.snapshotFromRecipe(saved.getId(), recipe, "CREATED");
+            batchRecipeItemRepository.saveAll(snapshot);
+        }
+        return detailView(saved);
     }
 
     /**

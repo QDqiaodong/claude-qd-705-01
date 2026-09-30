@@ -57,6 +57,13 @@ public class RecipeController {
         return ApiResponse.success(recipeService.get(id));
     }
 
+    /** 更新基准批量（L）：缩放比例分母 */
+    @PutMapping("/{id}/base-batch")
+    public ApiResponse<Views.RecipeView> updateBaseBatch(@PathVariable("id") Long id,
+                                                         @RequestBody RecipeDtos.BaseBatchReq req) {
+        return ApiResponse.success("基准批量已更新", recipeService.updateBaseBatch(id, req.getBaseBatchL()));
+    }
+
     /** 【Map 查】某个配方的全部投放阶段用量 */
     @GetMapping("/{id}/items")
     public ApiResponse<List<Views.RecipeItemView>> items(@PathVariable("id") Long id) {
@@ -85,9 +92,25 @@ public class RecipeController {
         return ApiResponse.success("用量已删除", recipeService.removeItem(id, stage));
     }
 
-    /** 环形图用的原料构成 */
+    /** 环形图用的原料构成（主维度内占比，与详情/批次详情同源） */
     @GetMapping("/{id}/composition")
     public ApiResponse<List<Views.CompositionSlice>> composition(@PathVariable("id") Long id) {
         return ApiResponse.success(recipeService.composition(id));
+    }
+
+    /** 缩放预览：原值 / 换算值 / 调整后值 / 余差去向，不落库 */
+    @PostMapping("/{id}/scale/preview")
+    public ApiResponse<Views.ScalePreviewView> scalePreview(@PathVariable("id") Long id,
+                                                            @Valid @RequestBody RecipeDtos.ScalePreviewReq req) {
+        return ApiResponse.success(recipeService.scalePreview(id, req.getTargetBatchL()));
+    }
+
+    /**
+     * 确认应用缩放：必须回传预览版本；预览后配方被改过则 409 过期，拒绝覆盖。
+     */
+    @PostMapping("/{id}/scale/apply")
+    public ApiResponse<Views.RecipeView> scaleApply(@PathVariable("id") Long id,
+                                                    @Valid @RequestBody RecipeDtos.ScaleApplyReq req) {
+        return ApiResponse.success("配方已按目标批量缩放", recipeService.scaleApply(id, req));
     }
 }

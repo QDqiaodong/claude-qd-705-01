@@ -121,8 +121,6 @@ public final class Views {
             "ADJUNCT", "#26a69a",
             "WATER", "#5c9dd6");
 
-    public static final List<String> INGREDIENT_TYPE_ORDER = List.of("MALT", "HOP", "YEAST", "ADJUNCT", "WATER");
-
     // ---------------- 投放阶段（Map 的 key） ----------------
     private static final Map<String, String> STAGE = Map.ofEntries(
             Map.entry("WATER", "水处理"),
@@ -356,6 +354,11 @@ public final class Views {
         private List<TimelineNode> timeline = new ArrayList<>();
         /** @ElementCollection Map 逐日温度/糖度曲线 */
         private List<CurvePoint> curve = new ArrayList<>();
+        /**
+         * 批次创建当时的配方用量快照（仅批次详情填充）。
+         * 是独立历史副本：配方后续改单位/缩放不会改写已生产批次。
+         */
+        private BatchRecipeSnapshotView recipeSnapshot;
         private LocalDateTime updatedAt;
 
         public static BatchView of(Batch e, String recipeName) {
@@ -625,8 +628,23 @@ public final class Views {
         private String ingredientName;
         private String ingredientType;
         private String ingredientTypeName;
+        /** 显示数量（酿酒师习惯单位，原样保留） */
         private BigDecimal quantity;
         private String unit;
+        /** 计量维度 MASS/VOLUME/COUNT；待处理行为 null */
+        private String dimension;
+        private String dimensionName;
+        /** 规范化单位（kg/g/L/mL/pkg 规范码） */
+        private String normalizedUnit;
+        /** 规范化数量（基准单位 g/mL/pkg）；待处理行为 null */
+        private BigDecimal normalizedQuantity;
+        /** OK/NORMALIZED/INFERRED/DIM_MISMATCH/NEEDS_REVIEW */
+        private String unitStatus;
+        /** 单位归一/推导说明 */
+        private String unitNote;
+        /** 单位可解析但与原料档案维度不一致（质量/体积可能填错） */
+        private boolean dimMismatch;
+        private boolean needsReview;
         private String note;
 
         public static RecipeItemView of(String stage, RecipeItem item) {
@@ -640,9 +658,39 @@ public final class Views {
             v.setIngredientTypeName(ingredientTypeName(item.getIngredientType()));
             v.setQuantity(item.getQuantity());
             v.setUnit(item.getUnit());
+            v.setDimension(item.getDimension());
+            com.brewery.craft.measure.Dimension d =
+                    com.brewery.craft.measure.Dimension.nameOf(item.getDimension());
+            v.setDimensionName(d == null ? null : d.getDisplayName());
+            v.setNormalizedUnit(item.getNormalizedUnit());
+            v.setNormalizedQuantity(item.getNormalizedQuantity());
+            v.setUnitStatus(item.getUnitStatus());
+            v.setUnitNote(item.getUnitNote());
+            v.setDimMismatch(com.brewery.craft.measure.ResolvedQuantity.DIM_MISMATCH.equals(item.getUnitStatus()));
+            v.setNeedsReview(com.brewery.craft.measure.ResolvedQuantity.NEEDS_REVIEW.equals(item.getUnitStatus()));
             v.setNote(item.getNote());
             return v;
         }
+    }
+
+    /** 一个维度上的规范化合计单元格 */
+    @Data
+    public static class MeasureCell {
+
+        private String dimension;
+        private String dimensionName;
+        private String baseUnit;
+        private BigDecimal amount;
+    }
+
+    /** 阶段小计：同一阶段、不同维度分列（质量与体积不相加） */
+    @Data
+    public static class StageTotalView {
+
+        private String stage;
+        private String stageName;
+        private int lineCount;
+        private List<MeasureCell> byDimension = new ArrayList<>();
     }
 
     @Data
@@ -651,7 +699,13 @@ public final class Views {
         private String ingredientType;
         private String ingredientTypeName;
         private String color;
+        /** 所属维度（占比只在同一维度内成立） */
+        private String dimension;
+        private String dimensionName;
+        /** 合计与占比所用单位 = 维度基准单位 g/mL/pkg */
+        private String baseUnit;
         private BigDecimal amount;
+        /** 该类型在【同维度内】的占比 */
         private BigDecimal percent;
     }
 
@@ -669,8 +723,22 @@ public final class Views {
         private BigDecimal targetEbc;
         private String processNote;
         private int itemCount;
-        /** 各原料类型占比（conic-gradient 环形图） */
+        /** 基准批量（L）：缩放比例的分母 */
+        private BigDecimal baseBatchL;
+        /** 乐观锁版本（缩放预览/确认防过期） */
+        private Integer version;
+        /** 各原料类型在各维度内的占比（conic-gradient 环形图取主维度） */
         private List<CompositionSlice> composition = new ArrayList<>();
+        /** 主维度：环形图绘制的那个维度（质量优先，其次体积、计数） */
+        private String primaryDimension;
+        private String primaryDimensionName;
+        private String primaryBaseUnit;
+        /** 整张配方按维度分列的规范化合计（g / mL / pkg，质量与体积不相加） */
+        private List<MeasureCell> totals = new ArrayList<>();
+        /** 按阶段的规范化小计 */
+        private List<StageTotalView> stageTotals = new ArrayList<>();
+        /** 无法可靠推导单位、未参与计算的明细数（页面需提示人工处理） */
+        private int reviewCount;
         private List<RecipeItemView> items = new ArrayList<>();
         private LocalDateTime updatedAt;
 
@@ -686,6 +754,8 @@ public final class Views {
             v.setTargetIbu(e.getTargetIbu());
             v.setTargetEbc(e.getTargetEbc());
             v.setProcessNote(e.getProcessNote());
+            v.setBaseBatchL(e.getBaseBatchL());
+            v.setVersion(e.getVersion());
             Map<String, RecipeItem> map = e.getItems() == null ? Map.of() : e.getItems();
             List<String> keys = new ArrayList<>(map.keySet());
             keys.sort((a, b) -> Integer.compare(STAGE_ORDER.indexOf(a) < 0 ? 99 : STAGE_ORDER.indexOf(a),
@@ -694,39 +764,175 @@ public final class Views {
                 v.getItems().add(RecipeItemView.of(key, map.get(key)));
             }
             v.setItemCount(v.getItems().size());
-            v.buildComposition();
             v.setUpdatedAt(e.getUpdatedAt());
             return v;
         }
 
-        private void buildComposition() {
-            Map<String, BigDecimal> sumByType = new LinkedHashMap<>();
-            BigDecimal total = BigDecimal.ZERO;
-            for (RecipeItemView it : items) {
-                if (it.getQuantity() == null) {
-                    continue;
+        /**
+         * 用统一聚合结果填充占比/合计/阶段小计。
+         * 列表、环形图、批次详情都走 {@link com.brewery.craft.measure.RecipeMath#aggregate}，同一份结果。
+         */
+        public void applyAggregate(com.brewery.craft.measure.RecipeMath.Aggregate agg) {
+            reviewCount = agg.reviewLines;
+            for (com.brewery.craft.measure.RecipeMath.Cell c : agg.dimensionTotals.values()) {
+                if (c.amount.signum() > 0) {
+                    totals.add(toCell(c));
                 }
-                sumByType.merge(it.getIngredientType(), it.getQuantity(), BigDecimal::add);
-                total = total.add(it.getQuantity());
             }
-            if (total.compareTo(BigDecimal.ZERO) <= 0) {
-                return;
-            }
-            for (String type : INGREDIENT_TYPE_ORDER) {
-                BigDecimal amount = sumByType.get(type);
-                if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
-                    continue;
+            for (var st : agg.stageTotals) {
+                StageTotalView sv = new StageTotalView();
+                sv.setStage(st.stage);
+                sv.setStageName(st.stageName);
+                sv.setLineCount(st.lineCount);
+                for (com.brewery.craft.measure.RecipeMath.Cell c : st.byDimension.values()) {
+                    sv.getByDimension().add(toCell(c));
                 }
-                CompositionSlice slice = new CompositionSlice();
-                slice.setIngredientType(type);
-                slice.setIngredientTypeName(ingredientTypeName(type));
-                slice.setColor(ingredientColor(type));
-                slice.setAmount(amount);
-                slice.setPercent(amount.multiply(BigDecimal.valueOf(100))
-                        .divide(total, 1, java.math.RoundingMode.HALF_UP));
-                composition.add(slice);
+                stageTotals.add(sv);
+            }
+            com.brewery.craft.measure.Dimension primary =
+                    com.brewery.craft.measure.RecipeMath.primaryDimension(agg);
+            // 没有任何可用明细时主维度保持为空，环形图由前端置灰
+            boolean hasAny = agg.dimensionTotals.values().stream().anyMatch(c -> c.amount.signum() > 0);
+            if (hasAny) {
+                primaryDimension = primary.name();
+                primaryDimensionName = primary.getDisplayName();
+                primaryBaseUnit = primary.getBaseUnit();
+                for (com.brewery.craft.measure.RecipeMath.Slice s : agg.slicesByDimension.get(primary.name())) {
+                    composition.add(toSlice(s));
+                }
             }
         }
+
+        private static MeasureCell toCell(com.brewery.craft.measure.RecipeMath.Cell c) {
+            MeasureCell m = new MeasureCell();
+            m.setDimension(c.dimension);
+            m.setDimensionName(c.dimensionName);
+            m.setBaseUnit(c.baseUnit);
+            m.setAmount(c.amount);
+            return m;
+        }
+
+        private static CompositionSlice toSlice(com.brewery.craft.measure.RecipeMath.Slice s) {
+            CompositionSlice sl = new CompositionSlice();
+            sl.setIngredientType(s.ingredientType);
+            sl.setIngredientTypeName(s.ingredientTypeName);
+            sl.setColor(s.color);
+            sl.setDimension(s.dimension);
+            sl.setDimensionName(com.brewery.craft.measure.Dimension.nameOf(s.dimension).getDisplayName());
+            sl.setBaseUnit(s.baseUnit);
+            sl.setAmount(s.amount);
+            sl.setPercent(s.percent);
+            return sl;
+        }
+    }
+
+    // ---------------- 模块三：配方缩放预览 / 应用结果 ----------------
+
+    /** 缩放预览中的单条明细：原值 → 换算值 → 取整值 → 余差去向 */
+    @Data
+    public static class ScaleLineView {
+
+        private String stage;
+        private String stageName;
+        private String ingredientCode;
+        private String ingredientName;
+        private String ingredientType;
+        private String ingredientTypeName;
+        private String dimension;
+        private String dimensionName;
+        /** 原值（显示单位） */
+        private BigDecimal originalQuantity;
+        private String originalUnit;
+        /** 原值换算到基准单位（g/mL/pkg） */
+        private BigDecimal originalBase;
+        /** 精确比例换算值（基准单位，未取整） */
+        private BigDecimal exactBase;
+        /** 先按步长向下取整的值（基准单位） */
+        private BigDecimal flooredBase;
+        /** 最终采用值（基准单位，已分配余差） */
+        private BigDecimal adjustedBase;
+        /** 本行分到的余差增量（+1/-1/0 个最小投放量） */
+        private BigDecimal remainderDelta;
+        /** 最终采用值换算回显示单位 */
+        private BigDecimal adjustedQuantity;
+        private String adjustedUnit;
+        /** 最小可投放量（基准单位） */
+        private BigDecimal minBase;
+        /** 余差去向说明 */
+        private String note;
+    }
+
+    /** 一个维度的缩放汇总 */
+    @Data
+    public static class ScaleDimensionView {
+
+        private String dimension;
+        private String dimensionName;
+        private String baseUnit;
+        private BigDecimal originalTotal;
+        private BigDecimal targetTotal;
+        private BigDecimal exactTotal;
+        private BigDecimal adjustedTotal;
+        /** 受最小投放量约束仍未对齐目标的余差（必须向用户明示；正常为 0） */
+        private BigDecimal leftover;
+        private List<ScaleLineView> lines = new ArrayList<>();
+    }
+
+    /** 缩放预览（不落库）；应用时必须带回 baseVersion 做版本校验 */
+    @Data
+    public static class ScalePreviewView {
+
+        private Long recipeId;
+        private String recipeName;
+        private Integer baseVersion;
+        private BigDecimal factor;
+        private BigDecimal baseBatchL;
+        private BigDecimal targetBatchL;
+        /** 预览时该配方存在的待处理单位明细数（存在则不允许应用，先修单位） */
+        private int reviewCount;
+        private List<ScaleDimensionView> dimensions = new ArrayList<>();
+        private List<ScaleLineView> lines = new ArrayList<>();
+    }
+
+    // ---------------- 模块二：批次创建当时的配方用量快照（只读历史） ----------------
+    @Data
+    public static class BatchRecipeItemView {
+
+        private String stage;
+        private String stageName;
+        private String ingredientCode;
+        private String ingredientName;
+        private String ingredientType;
+        private String ingredientTypeName;
+        private BigDecimal quantity;
+        private String unit;
+        private String dimension;
+        private String dimensionName;
+        private String normalizedUnit;
+        private BigDecimal normalizedQuantity;
+        private String unitStatus;
+        private String unitNote;
+        private boolean dimMismatch;
+        private boolean needsReview;
+        /** CREATED 建档快照 / MIGRATED 历史回填 */
+        private String snapshotSource;
+        private String snapshotSourceName;
+    }
+
+    /** 批次快照的规范化合计（按维度分列，与配方页同一套规则） */
+    @Data
+    public static class BatchRecipeSnapshotView {
+
+        private Long batchId;
+        private String batchNo;
+        private String recipeName;
+        /** 快照时的配方版本（历史回填为空） */
+        private Integer recipeVersion;
+        private boolean migrated;
+        private List<BatchRecipeItemView> items = new ArrayList<>();
+        private List<MeasureCell> totals = new ArrayList<>();
+        private List<StageTotalView> stageTotals = new ArrayList<>();
+        private int reviewCount;
     }
 
     @Data

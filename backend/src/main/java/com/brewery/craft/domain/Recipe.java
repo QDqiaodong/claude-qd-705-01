@@ -16,6 +16,7 @@ import jakarta.persistence.JoinTable;
 import jakarta.persistence.MapKeyColumn;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import lombok.Data;
 
 /** 模块三：配方。 */
@@ -56,6 +57,13 @@ public class Recipe {
     @Column(name = "target_ebc", precision = 5, scale = 1)
     private BigDecimal targetEbc;
 
+    /**
+     * 基准批量（L）：这张配方明细所对应的标准投料批量，缩放比例 = 目标批量 / 基准批量。
+     * 种子/历史配方由数据迁移按 1000L 兜底；应用缩放后同步刷新为本次目标批量。
+     */
+    @Column(name = "base_batch_l", precision = 10, scale = 2)
+    private BigDecimal baseBatchL;
+
     @Column(name = "process_note", length = 512)
     private String processNote;
 
@@ -71,6 +79,14 @@ public class Recipe {
             inverseJoinColumns = @JoinColumn(name = "item_id", unique = true))
     @MapKeyColumn(name = "stage")
     private Map<String, RecipeItem> items = new LinkedHashMap<>();
+
+    /**
+     * 乐观锁版本：缩放预览→确认之间若有人改过配方（增删改明细、改基准批量），
+     * 应用时版本对不上会被拒绝并提示重新计算，绝不把旧预览覆盖到新数据上。
+     */
+    @Version
+    @Column(name = "version", nullable = false)
+    private Integer version;
 
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;

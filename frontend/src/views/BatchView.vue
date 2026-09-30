@@ -116,6 +116,52 @@
           <el-button size="small" plain @click="openReading(detail)">补录测量</el-button>
         </div>
 
+        <!-- 创建当时的配方用量快照（历史副本，配方后续改动不影响本批次） -->
+        <template v-if="detail.recipeSnapshot">
+          <el-divider content-position="left">
+            创建当时配方用量快照
+            <el-tag size="small" :type="detail.recipeSnapshot.migrated ? 'info' : 'success'" style="margin-left: 8px">
+              {{ detail.recipeSnapshot.migrated ? '历史批次迁移回填' : '建档时固化' }}
+            </el-tag>
+          </el-divider>
+          <el-alert v-if="detail.recipeSnapshot.reviewCount > 0" type="warning" :closable="false" show-icon
+                    style="margin-bottom: 8px"
+                    :title="`该快照有 ${detail.recipeSnapshot.reviewCount} 条历史单位无法可靠换算，已保留原值但不计入合计`" />
+          <el-table :data="detail.recipeSnapshot.items" size="small" border max-height="240">
+            <el-table-column prop="stageName" label="阶段" width="105" />
+            <el-table-column prop="ingredientName" label="原料" min-width="110" />
+            <el-table-column label="当时用量" width="110">
+              <template #default="{ row }">
+                <span :class="{ 'snap-review': row.needsReview }">
+                  {{ row.quantity }} {{ row.unit || '（空）' }}
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column label="规范化" width="120">
+              <template #default="{ row }">
+                <el-tooltip v-if="row.unitNote" :content="row.unitNote" placement="top" :show-after="100">
+                  <span v-if="row.needsReview" class="snap-review">待处理</span>
+                  <span v-else :class="row.dimMismatch ? 'snap-mismatch' : ''">
+                    {{ row.normalizedQuantity }} {{ baseUnit(row.dimension) }}
+                  </span>
+                </el-tooltip>
+                <span v-else-if="row.needsReview" class="snap-review">待处理</span>
+                <span v-else>{{ row.normalizedQuantity }} {{ baseUnit(row.dimension) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="说明" min-width="140" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.unitNote || '—' }}</template>
+            </el-table-column>
+          </el-table>
+          <div style="margin-top: 6px; font-size: 12px">
+            规范化合计：
+            <b v-for="t in detail.recipeSnapshot.totals" :key="t.dimension" style="margin-right: 14px">
+              {{ t.dimensionName }} {{ t.amount }} {{ t.baseUnit }}
+            </b>
+            <span style="color: #909399">（质量与体积分列，按创建当时用量计算，不随后续配方变化）</span>
+          </div>
+        </template>
+
         <el-divider content-position="left">
           质检放行
           <span class="tag-inline qc-tag" :style="{ background: qcColor(qc.current?.status), marginLeft: '10px' }">
@@ -336,6 +382,9 @@ function fmt(v) {
   if (!v) return '—'
   return String(v).replace('T', ' ').slice(5, 16)
 }
+function baseUnit(dim) {
+  return { MASS: 'g', VOLUME: 'mL', COUNT: 'pkg' }[dim] || ''
+}
 function dt(v) {
   if (!v) return '—'
   return String(v).replace('T', ' ').slice(0, 16)
@@ -495,4 +544,6 @@ onMounted(async () => {
 
 <style scoped>
 .qc-tag { color: #303133; }
+.snap-review { color: #c0392b; font-weight: 600; }
+.snap-mismatch { color: #b88230; font-weight: 600; border-bottom: 1px dashed #b88230; cursor: help; }
 </style>

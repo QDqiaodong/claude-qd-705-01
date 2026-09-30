@@ -62,6 +62,14 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * 缩放预览过期：预览对应的配方版本已不是当前版本，必须重新计算后再应用
+     */
+    @ExceptionHandler(StalePreviewException.class)
+    public ResponseEntity<ApiResponse<Void>> handleStalePreview(StalePreviewException e) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.fail(e.getMessage()));
+    }
+
+    /**
      * 悲观行锁等待超时：并发的放行/下游推进已被串行化，提示重试而不是产生两条状态链
      */
     @ExceptionHandler(CannotAcquireLockException.class)

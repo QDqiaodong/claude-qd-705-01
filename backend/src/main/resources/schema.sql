@@ -74,7 +74,9 @@ CREATE TABLE recipe (
     target_abv   DECIMAL(4,2)            COMMENT '目标酒精度 %vol',
     target_ibu   DECIMAL(5,1)            COMMENT '目标苦度 IBU',
     target_ebc   DECIMAL(5,1)            COMMENT '目标色度 EBC',
+    base_batch_l DECIMAL(10,2)           COMMENT '基准批量（L），缩放比例 = 目标批量 / 基准批量',
     process_note VARCHAR(512)            COMMENT '工艺说明',
+    version      INT           NOT NULL DEFAULT 0 COMMENT '乐观锁版本（缩放预览过期校验）',
     updated_at   DATETIME,
     PRIMARY KEY (id),
     UNIQUE KEY uk_recipe_code (code)
@@ -91,15 +93,41 @@ CREATE TABLE recipe_item_slot (
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
 
 CREATE TABLE recipe_item (
-    id              BIGINT        NOT NULL AUTO_INCREMENT,
-    ingredient_code VARCHAR(24)   NOT NULL COMMENT '原料编码',
-    ingredient_name VARCHAR(64)            COMMENT '原料名称',
-    ingredient_type VARCHAR(16)            COMMENT 'MALT/HOP/YEAST/ADJUNCT/WATER',
-    quantity        DECIMAL(10,3) NOT NULL COMMENT '用量',
-    unit            VARCHAR(8)             COMMENT '单位',
-    note            VARCHAR(128)           COMMENT '投放备注',
+    id                  BIGINT        NOT NULL AUTO_INCREMENT,
+    ingredient_code     VARCHAR(24)   NOT NULL COMMENT '原料编码',
+    ingredient_name     VARCHAR(64)            COMMENT '原料名称',
+    ingredient_type     VARCHAR(16)            COMMENT 'MALT/HOP/YEAST/ADJUNCT/WATER',
+    quantity            DECIMAL(10,3) NOT NULL COMMENT '用量（显示值，按 unit 酿酒师习惯单位）',
+    unit                VARCHAR(8)             COMMENT '显示单位（历史可能为空/大小写/旧写法，保留不改）',
+    dimension           VARCHAR(16)            COMMENT '规范化：MASS/VOLUME/COUNT',
+    normalized_unit     VARCHAR(8)             COMMENT '规范化：规范单位码 kg/g/L/mL/pkg',
+    normalized_quantity DECIMAL(14,3)          COMMENT '规范化：基准单位数量（g/mL/pkg）',
+    unit_status         VARCHAR(16)            COMMENT 'OK/NORMALIZED 旧写法归一/INFERRED 空单位推导/NEEDS_REVIEW 待处理',
+    unit_note           VARCHAR(256)           COMMENT '单位推导/归一说明',
+    note                VARCHAR(128)           COMMENT '投放备注',
     PRIMARY KEY (id),
     KEY idx_item_ingredient (ingredient_code)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+
+-- 批次创建当时的配方用量【快照】（独立不可变副本；配方后续改单位/缩放不影响已生产批次）。
+-- 历史批次由应用启动迁移以 snapshot_source=MIGRATED 回填。
+CREATE TABLE batch_recipe_item (
+    id                  BIGINT        NOT NULL AUTO_INCREMENT,
+    batch_id            BIGINT        NOT NULL COMMENT '所属批次',
+    stage               VARCHAR(24)   NOT NULL COMMENT '投放阶段（快照时的 Map key）',
+    ingredient_code     VARCHAR(24)   NOT NULL COMMENT '原料编码',
+    ingredient_name     VARCHAR(64)            COMMENT '原料名称',
+    ingredient_type     VARCHAR(16)            COMMENT 'MALT/HOP/YEAST/ADJUNCT/WATER',
+    quantity            DECIMAL(10,3) NOT NULL COMMENT '用量（显示值）',
+    unit                VARCHAR(8)             COMMENT '显示单位',
+    dimension           VARCHAR(16)            COMMENT 'MASS/VOLUME/COUNT',
+    normalized_unit     VARCHAR(8)             COMMENT '规范单位码',
+    normalized_quantity DECIMAL(14,3)          COMMENT '基准单位数量',
+    unit_status         VARCHAR(16)            COMMENT 'OK/NORMALIZED/INFERRED/NEEDS_REVIEW',
+    unit_note           VARCHAR(256)           COMMENT '单位推导/归一说明',
+    snapshot_source     VARCHAR(16)   NOT NULL COMMENT 'CREATED 建档快照 / MIGRATED 历史回填',
+    PRIMARY KEY (id),
+    KEY idx_batch_recipe_item_batch (batch_id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
 
 -- ---------------- 模块二：啤酒批次 ----------------
@@ -277,20 +305,26 @@ INSERT INTO ingredient (id, code, name, type, unit, stock, safety_stock, unit_pr
 (14, 'ADJ-CITR',  '陈皮',            'ADJUNCT', 'kg',   28.000,  10.000,  46.00, '广州果脯',   '2027-01-15', NOW()),
 (15, 'ADJ-CORI',  '芫荽籽',          'ADJUNCT', 'kg',    9.000,  12.000,  68.00, '广州果脯',   '2027-02-28', NOW()),
 (16, 'WAT-GYP',   '酿造石膏',        'WATER',   'kg',   60.000,  25.000,  12.00, '润水化学',   '2028-01-31', NOW()),
-(17, 'ADJ-CHER',  '樱桃果泥',        'ADJUNCT', 'kg',  120.000,  40.000,  22.00, '大连果源',   '2026-12-15', NOW());
+(17, 'ADJ-CHER',  '樱桃果泥',        'ADJUNCT', 'kg',  120.000,  40.000,  22.00, '大连果源',   '2026-12-15', NOW()),
+-- 体积计量原料（历史配方 R-1011 使用；旧档案单位为大写）
+(18, 'WAT-LAC',   '乳酸溶液',        'WATER',   'L',     8.000,   3.000,  90.00, '润水化学',   '2027-09-30', NOW()),
+(19, 'ADJ-HONEY', '洋槐蜂蜜',        'ADJUNCT', 'kg',   45.000,  15.000,  36.00, '秦岭蜂业',   '2027-03-31', NOW()),
+(20, 'HOP-OLD',   '陈花（旧批次）',  'HOP',     'kg',    6.000,   3.000, 120.00, '库存陈花',   '2026-10-31', NOW());
 
--- ---------------- 3. 配方（10 条） ----------------
-INSERT INTO recipe (id, code, name, style, target_og, target_abv, target_ibu, target_ebc, process_note, updated_at) VALUES
-(1,  'R-1001', '晨雾 IPA',         'IPA',      1.062, 6.50, 65.0, 12.0, '单步糖化 66℃ 60 分钟，煮沸 60 分钟，全程干投一次', NOW()),
-(2,  'R-1002', '双倍干投浑浊 IPA', 'IPA',      1.075, 8.20, 75.0, 14.0, '蛋白休止 52℃ 15 分钟，两次干投，冷贮前不滤',     NOW()),
-(3,  'R-1003', '午夜世涛',         'STOUT',    1.068, 7.00, 45.0, 78.0, '深色麦芽糖化末期投放，避免涩感',                  NOW()),
-(4,  'R-1004', '燕麦咖啡世涛',     'STOUT',    1.072, 7.80, 40.0, 82.0, '燕麦片 8%，熟成 21 天后加冷萃咖啡液',            NOW()),
-(5,  'R-1005', '波西米亚皮尔森',   'PILSNER',  1.048, 4.80, 38.0,  6.0, '三段煮出糖化，萨兹酒花三次投放，低温长贮 28 天',  NOW()),
-(6,  'R-1006', '德式小麦白啤',     'WHEAT',    1.050, 5.20, 15.0,  9.0, '小麦芽占比 55%，香蕉丁香风味靠 20℃ 发酵 4 天',   NOW()),
-(7,  'R-1007', '比利时小麦 Wit',   'WHEAT',    1.048, 4.90, 12.0,  8.0, '生小麦芽 40%，陈皮与芫荽籽末段投放',              NOW()),
-(8,  'R-1008', '樱桃兰比克',       'SOUR',     1.052, 5.60,  8.0, 22.0, '陈年酒花，自然接种后橡木桶陈放 6 个月',            NOW()),
-(9,  'R-1009', '海盐酸柠檬古斯',   'SOUR',     1.044, 4.40,  6.0,  7.0, '乳酸菌酸化 24 小时后再煮沸，加海盐 0.3%',        NOW()),
-(10, 'R-1010', '落日淡色艾尔',     'PALE_ALE', 1.054, 5.40, 35.0, 11.0, '水晶麦芽提色，干投一次做柑橘收尾',                NOW());
+-- ---------------- 3. 配方（11 条；11 号为含混合/空/未知单位的历史遗留配方，由启动迁移推导） ----------------
+INSERT INTO recipe (id, code, name, style, target_og, target_abv, target_ibu, target_ebc, base_batch_l, process_note, version, updated_at) VALUES
+(1,  'R-1001', '晨雾 IPA',         'IPA',      1.062, 6.50, 65.0, 12.0, 1200.00, '单步糖化 66℃ 60 分钟，煮沸 60 分钟，全程干投一次', 0, NOW()),
+(2,  'R-1002', '双倍干投浑浊 IPA', 'IPA',      1.075, 8.20, 75.0, 14.0, 2100.00, '蛋白休止 52℃ 15 分钟，两次干投，冷贮前不滤',     0, NOW()),
+(3,  'R-1003', '午夜世涛',         'STOUT',    1.068, 7.00, 45.0, 78.0, 2200.00, '深色麦芽糖化末期投放，避免涩感',                  0, NOW()),
+(4,  'R-1004', '燕麦咖啡世涛',     'STOUT',    1.072, 7.80, 40.0, 82.0,  780.00, '燕麦片 8%，熟成 21 天后加冷萃咖啡液',            0, NOW()),
+(5,  'R-1005', '波西米亚皮尔森',   'PILSNER',  1.048, 4.80, 38.0,  6.0, 1500.00, '三段煮出糖化，萨兹酒花三次投放，低温长贮 28 天',  0, NOW()),
+(6,  'R-1006', '德式小麦白啤',     'WHEAT',    1.050, 5.20, 15.0,  9.0,  800.00, '小麦芽占比 55%，香蕉丁香风味靠 20℃ 发酵 4 天',   0, NOW()),
+(7,  'R-1007', '比利时小麦 Wit',   'WHEAT',    1.048, 4.90, 12.0,  8.0,  760.00, '生小麦芽 40%，陈皮与芫荽籽末段投放',              0, NOW()),
+(8,  'R-1008', '樱桃兰比克',       'SOUR',     1.052, 5.60,  8.0, 22.0,  420.00, '陈年酒花，自然接种后橡木桶陈放 6 个月',            0, NOW()),
+(9,  'R-1009', '海盐酸柠檬古斯',   'SOUR',     1.044, 4.40,  6.0,  7.0,  400.00, '乳酸菌酸化 24 小时后再煮沸，加海盐 0.3%',        0, NOW()),
+(10, 'R-1010', '落日淡色艾尔',     'PALE_ALE', 1.054, 5.40, 35.0, 11.0, 1500.00, '水晶麦芽提色，干投一次做柑橘收尾',                0, NOW()),
+-- 历史遗留配方：单位大小写不一致、克与千克混用、升与毫升混用、空单位、无法识别单位（待处理）
+(11, 'R-1011', '老厂桶陈艾尔（旧配方）', 'PALE_ALE', 1.056, 5.80, 28.0, 18.0, NULL, '早期手工记录，单位写法不统一，待整理核对',        0, NOW());
 
 -- ---------------- 3. 配方 Map 用量明细（49 条：明细本体 + Map 的 key 映射） ----------------
 INSERT INTO recipe_item (id, ingredient_code, ingredient_name, ingredient_type, quantity, unit, note) VALUES
@@ -342,7 +376,14 @@ INSERT INTO recipe_item (id, ingredient_code, ingredient_name, ingredient_type, 
 (46, 'HOP-CAS', '卡斯卡特酒花', 'HOP', 0.900, 'kg', '苦花'),
 (47, 'HOP-MOS', '摩西酒花', 'HOP', 0.600, 'kg', '香花'),
 (48, 'HOP-CIT', '西楚酒花', 'HOP', 0.700, 'kg', '干投一次'),
-(49, 'YEAST-US05', 'US-05 艾尔酵母', 'YEAST', 2.000, 'pkg', '18.5℃ 接种');
+(49, 'YEAST-US05', 'US-05 艾尔酵母', 'YEAST', 2.000, 'pkg', '18.5℃ 接种'),
+-- R-1011 历史遗留：规范化列全部留空，由启动迁移推导/标记
+(50, 'MALT-MUN', '慕尼黑麦芽', 'MALT', 180000.000, 'G',   '大写单位，克与千克混用'),
+(51, 'HOP-OLD',  '陈花（旧批次）', 'HOP', 0.500, 'KG',  '大写单位'),
+(52, 'WAT-LAC',  '乳酸溶液', 'WATER', 1.200,  'ltr', '旧写法升'),
+(53, 'WAT-LAC',  '乳酸溶液', 'WATER', 500.000, 'ML',  '毫升'),
+(54, 'ADJ-HONEY','洋槐蜂蜜', 'ADJUNCT', 3.000, NULL,   '空单位，按档案 kg 推导'),
+(55, 'HOP-OLD',  '陈花（旧批次）', 'HOP', 0.300, '罐',  '无法识别单位，待人工处理');
 
 INSERT INTO recipe_item_slot (recipe_id, stage, item_id) VALUES
 (1, 'MASH_IN', 1),
@@ -393,7 +434,14 @@ INSERT INTO recipe_item_slot (recipe_id, stage, item_id) VALUES
 (10, 'BOIL_60', 46),
 (10, 'BOIL_5', 47),
 (10, 'DRYHOP_1', 48),
-(10, 'PITCH', 49);
+(10, 'PITCH', 49),
+-- R-1011 历史遗留配方
+(11, 'MASH_IN', 50),
+(11, 'BOIL_60', 51),
+(11, 'WATER', 52),
+(11, 'SPARGE', 53),
+(11, 'WHIRLPOOL', 54),
+(11, 'DRYHOP_1', 55);
 
 -- ---------------- 2. 啤酒批次（13 条） ----------------
 INSERT INTO batch (id, batch_no, recipe_id, fermenter_no, brewer, brew_date, mash_start, mash_end, boil_end, ferment_start, expected_mature, actual_mature, volume_l, abv, ibu, ebc, status, updated_at) VALUES
@@ -422,7 +470,11 @@ INSERT INTO batch (id, batch_no, recipe_id, fermenter_no, brewer, brew_date, mas
 (12, 'BC-2026-112', 3,  NULL,    '李承泽', '2026-09-24', NULL, NULL, NULL, NULL, NULL, NULL,
      2000.00, NULL, NULL, NULL, 'PLAN', NOW()),
 (13, 'BC-2026-113', 6,  NULL,    '周敏',   '2026-09-26', NULL, NULL, NULL, NULL, NULL, NULL,
-     800.00, NULL, NULL, NULL, 'PLAN', NOW());
+     800.00, NULL, NULL, NULL, 'PLAN', NOW()),
+-- 引用历史遗留配方 R-1011 的旧批次：其用量快照由迁移回填，保留创建当时的原始单位
+(14, 'BC-2026-114', 11, NULL,    '陈墨',   '2026-07-12', '2026-07-12 08:00:00', '2026-07-12 09:30:00',
+     '2026-07-12 11:00:00', '2026-07-12 16:00:00', '2026-07-30', '2026-08-02',
+     1000.00, 5.70, 27.0, 17.0, 'PACKAGED', NOW());
 
 -- ---------------- 2. 逐日温度曲线（Map<String,BigDecimal>） ----------------
 INSERT INTO batch_temp_reading (batch_id, day_key, temp_value) VALUES

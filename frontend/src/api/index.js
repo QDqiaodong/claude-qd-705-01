@@ -58,12 +58,14 @@ export const qcApi = {
   revoke: (batchId, roundId, data) => http.post(`/batches/${batchId}/qc/rounds/${roundId}/revoke`, data)
 }
 
-/** 模块三：配方与原料用量（Map<String, RecipeItem> 的增删改查） */
+/** 模块三：配方与原料用量（Map<String, RecipeItem> 的增删改查 + 统一计量/缩放） */
 export const recipeApi = {
   list: () => http.get('/recipes'),
   stages: () => http.get('/recipes/stages'),
   get: (id) => http.get(`/recipes/${id}`),
   create: (data) => http.post('/recipes', data),
+  /** 更新基准批量（L），缩放比例分母 */
+  updateBaseBatch: (id, baseBatchL) => http.put(`/recipes/${id}/base-batch`, { baseBatchL }),
   /** Map 查：整张 Map */
   items: (id) => http.get(`/recipes/${id}/items`),
   /** Map 按 key 查 */
@@ -72,7 +74,11 @@ export const recipeApi = {
   putItem: (id, stage, data) => http.put(`/recipes/${id}/items/${stage}`, data),
   /** Map 删 */
   removeItem: (id, stage) => http.delete(`/recipes/${id}/items/${stage}`),
-  composition: (id) => http.get(`/recipes/${id}/composition`)
+  composition: (id) => http.get(`/recipes/${id}/composition`),
+  /** 缩放预览（不落库）：原值/换算值/调整后值/余差去向 */
+  scalePreview: (id, targetBatchL) => http.post(`/recipes/${id}/scale/preview`, { targetBatchL }),
+  /** 确认应用缩放：必须带预览版本，期间改过明细会 409 过期 */
+  scaleApply: (id, data) => http.post(`/recipes/${id}/scale/apply`, data)
 }
 
 /** 模块四：原料库存 */
